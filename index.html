@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RSI Touch AutoTrader - Volatility 90 1s</title>
+  <style>
+    body { background:#111; color:#eee; font-family:sans-serif; text-align:center; padding:10px; }
+    input, button { padding:10px; margin:5px; border-radius:8px; border:none; }
+    input { width:90%; background:#222; color:#fff; }
+    button { width:42%; font-weight:bold; cursor:pointer; }
+    #logs { max-height:200px; overflow:auto; background:#222; padding:10px; border-radius:10px; text-align:left; }
+    .signal { font-size:20px; margin-top:10px; }
+  </style>
+</head>
+<body>
+  <h2>RSI Touch AutoTrader — Volatility 90 (1s)</h2>
+  <p>RSI(14)-based Touch/No-Touch auto trading. Duration 7 minutes. Use DEMO token first.</p>
+
+  <input id="token" placeholder="Paste your Deriv API token here" />
+  <br>
+  <input id="stake" type="number" placeholder="Stake ($)" value="1" />
+  <input id="barrierPct" type="number" placeholder="Barrier %" value="0.005" step="0.001" />
+  <br>
+  <button onclick="connectWS()">Connect</button>
+  <button onclick="authorize()">Authorize</button>
+  <br>
+  <button style="background:#28a745;color:white;" onclick="startBot()">Start</button>
+  <button style="background:#dc3545;color:white;" onclick="stopBot()">Stop</button>
+
+  <div id="status"></div>
+  <div id="rsiValue"></div>
+  <div class="signal" id="signal">Signal: —</div>
+  <div id="logs"></div>
+
+<script>
+let ws;
+let connected=false;
+let authorized=false;
+let running=false;
+let prices=[];
+let lastRsi=null;
+const RSI_PERIOD=14;
+const SYMBOL="R_90";
+const DURATION_MINUTES=7;
+
+function log(msg){
+  const logs=document.getElementById('logs');
+  const p=document.createElement('div');
+  p.textContent=new Date().toLocaleTimeString()+": "+msg;
+  logs.prepend(p);
+}
+
+function connectWS(){
+  ws=new WebSocket('wss://ws.binaryws.com/websockets/v3');
+  ws.onopen=()=>{connected=true;log('Connected');document.getElementById('status').textContent='Connected';};
+  ws.onmessage=(m)=>{
+    const data=JSON.parse(m.data);
+    if(data.error){log('Error: '+data.error.message);}  
+    if(data.authorize){authorized=true;log('Authorized');}
+    if(data.tick){
+      const price=parseFloat(data.tick.quote);
+      prices.push(price);
+      if(prices.length>500) prices.shift();
+      const rsi=computeRsi(prices);
+      if(rsi){
+        document.getElementById('rsiValue').textContent='RSI(14): '+rsi.toFixed(2);
+        if(lastRsi!==null){
+          if(lastRsi<=30 && rsi>30){document.getElementById('signal').textContent='Signal: TOUCH UP';handleTrade('up',price);}
+          else if(lastRsi>=70 && rsi<70){document.getElementById('signal').textContent='Signal: TOUCH DOWN';handleTrade('down',price);}
+          else document.getElementById('signal').textContent='Signal: —';
+        }
+        lastRsi=rsi;
+      }
+    }
+  };
+  ws.onclose=()=>{connected=false;authorized=false;log('Closed');document.getElementById('status').textContent='Disconnected';}
+}
+
+function authorize(){
+  const token=document.getElementById('token').value;
+  if(ws && ws.readyState===1){ws.send(JSON.stringify({authorize:token}));log('Sent authorize');}
+}
+
+function startBot(){
+  if(!connected){connectWS();setTimeout(()=>subscribeTicks(true),1000);}else{subscribeTicks(true);}running=true;log('Bot started');}
+function stopBot(){running=false;if(ws){ws.close();}log('Bot stopped');}
+function subscribeTicks(on){if(on){ws.send(JSON.stringify({ticks:SYMBOL}));log('Subscribed ticks');}}
+
+function computeRsi(arr){
+  if(arr.length<RSI_PERIOD+1) return null;
+  let gains=0,losses=0;
+  for(let i=arr.length-RSI_PERIOD;i<arr.length;i++){
+    const diff=arr[i]-arr[i-1];
+    if(diff>0) gains+=diff; else losses+=-diff;
+  }
+  const avgGain=gains/RSI_PERIOD, avgLoss=losses/RSI_PERIOD;
+  if(avgLoss===0) return 100;
+  const rs=avgGain/avgLoss;
+  return 100-(100/(1+rs));
+}
+
+function handleTrade(direction,price){
+  if(!running) return;
+  const stake=parseFloat(document.getElementById('stake').value);
+  const barrierPct=parseFloat(document.getElementById('barrierPct').value);
+  const barrier=direction==='up'?price*(1+barrierPct):price*(1-barrierPct);
+  log(`Trade ${direction.toUpperCase()} barrier ${barrier.toFixed(5)}`);
+  if(!authorized){log('Not authorized');return;}
+  const buyReq={buy:1,price:stake,parameters:{amount:stake,basis:'stake',contract_type:'touch',symbol:SYMBOL,duration:DURATION_MINUTES,duration_unit:'m',barrier:barrier.toString()}};
+  ws.send(JSON.stringify(buyReq));
+  log('Buy sent');
+}
+</script>
+</body>
+</html>
